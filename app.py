@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+from datetime import datetime
 
 # ── Page Config ─────────────────────────────────────────────────────────
 st.set_page_config(
@@ -18,6 +19,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Session State ───────────────────────────────────────────────────────
+if "history" not in st.session_state:
+    st.session_state.history = []
+
 
 # ── Load Artifacts ──────────────────────────────────────────────────────
 @st.cache_resource
@@ -48,19 +54,13 @@ totalcharges_median = preprocessor["totalcharges_median"]
 # ── Preprocessing Function ───────────────────────────────────────────────
 def preprocess_input(raw_input: dict) -> pd.DataFrame:
     df = pd.DataFrame([raw_input])
-
-    # Drop customerID if present
     df.drop(columns=["customerID"], errors="ignore", inplace=True)
 
-    # TotalCharges: estimate from tenure * MonthlyCharges if empty/zero
     if pd.isna(df["TotalCharges"].iloc[0]) or df["TotalCharges"].iloc[0] == 0:
         df["TotalCharges"] = df["tenure"] * df["MonthlyCharges"]
     df["TotalCharges"] = df["TotalCharges"].fillna(totalcharges_median)
-
-    # SeniorCitizen: 0/1 -> object so get_dummies encodes it
     df["SeniorCitizen"] = df["SeniorCitizen"].astype(object)
 
-    # One-hot encode, then align columns to match training set
     df_encoded = pd.get_dummies(df, drop_first=True)
     for col in feature_columns:
         if col not in df_encoded.columns:
@@ -69,6 +69,30 @@ def preprocess_input(raw_input: dict) -> pd.DataFrame:
 
     X_scaled = scaler.transform(df_encoded.astype(float))
     return X_scaled
+
+
+# ── Risk Breakdown ──────────────────────────────────────────────────────
+def get_active_risk_factors(inputs: dict) -> list:
+    factors = []
+    if inputs["Contract"] == "Month-to-month":
+        factors.append(("Contract Type", "Month-to-month (42.7% churn rate)"))
+    if inputs["tenure"] < 10:
+        factors.append(("Tenure", f"{inputs['tenure']} months (< 10, highest risk period)"))
+    if inputs["InternetService"] == "Fiber optic":
+        factors.append(("Internet Service", "Fiber optic (2x churn vs DSL)"))
+    if inputs["PaymentMethod"] == "Electronic check":
+        factors.append(("Payment Method", "Electronic check (highest-risk payment)"))
+    if inputs["MonthlyCharges"] >= 80:
+        factors.append(("Monthly Charges", f"${inputs['MonthlyCharges']:.0f}/mo (high)"))
+    if inputs["SeniorCitizen"] == 1:
+        factors.append(("Senior Citizen", "Senior citizens churn at higher rates"))
+    if inputs["Partner"] == "No":
+        factors.append(("Partner", "No partner (less household stability)"))
+    if inputs["Dependents"] == "No":
+        factors.append(("Dependents", "No dependents (less household stability)"))
+    if inputs["PaperlessBilling"] == "Yes":
+        factors.append(("Paperless Billing", "Paperless billing users churn more"))
+    return factors
 
 
 # ── UI: Header ──────────────────────────────────────────────────────────
@@ -82,14 +106,12 @@ st.markdown(
 st.sidebar.header("Customer Information")
 st.sidebar.markdown("---")
 
-# Demographics
 st.sidebar.subheader("Demographics")
 gender = st.sidebar.selectbox("Gender", ["Male", "Female"])
 senior_citizen = st.sidebar.selectbox("Senior Citizen", ["No", "Yes"])
 partner = st.sidebar.selectbox("Has Partner", ["No", "Yes"])
 dependents = st.sidebar.selectbox("Has Dependents", ["No", "Yes"])
 
-# Account & Tenure
 st.sidebar.subheader("Account & Tenure")
 tenure = st.sidebar.slider("Tenure (months)", 0, 72, 12)
 contract = st.sidebar.selectbox("Contract", ["Month-to-month", "One year", "Two year"])
@@ -101,13 +123,9 @@ payment_method = st.sidebar.selectbox(
 monthly_charges = st.sidebar.slider("Monthly Charges ($)", 18.0, 120.0, 70.0, step=1.0)
 total_charges_input = st.sidebar.number_input(
     "Total Charges ($) \u2014 leave 0 to auto-calculate",
-    min_value=0.0,
-    max_value=10000.0,
-    value=0.0,
-    step=10.0,
+    min_value=0.0, max_value=10000.0, value=0.0, step=10.0,
 )
 
-# Services
 st.sidebar.subheader("Services")
 phone_service = st.sidebar.selectbox("Phone Service", ["No", "Yes"])
 multiple_lines = st.sidebar.selectbox("Multiple Lines", ["No", "Yes", "No phone service"])
@@ -173,6 +191,20 @@ if predict_btn:
             proba = model.predict_proba(X_input)[0, 1]
             prediction = int(proba >= 0.5)
 
+            # ── Save to session history ─────────────────────────────
+            entry = {
+                "Timestamp": datetime.now().strftime("%H:%M:%S"),
+                "Tenure": tenure,
+                "Contract": contract,
+                "Internet": internet_service,
+                "Monthly": f"${monthly_charges:.0f}",
+                "Payment": payment_method,
+                "Probability": f"{proba:.1%}",
+                "Prediction": "Churn \u26a0\ufe0f" if prediction else "Stay \u2705",
+            }
+            st.session_state.history.append(entry)
+
+            # ── Result columns ──────────────────────────────────────
             col1, col2 = st.columns([1, 2])
 
             with col1:
@@ -183,6 +215,17 @@ if predict_btn:
 
                 st.metric("Churn Probability", f"{proba:.1%}")
                 st.metric("Confidence", f"{max(proba, 1 - proba):.1%}")
+
+                # Risk gauge
+                pct = int(round(proba * 100))
+                color = "red" if pct >= 50 else "orange" if pct >= 30 else "green"
+                st.markdown(
+                    f'<div style="height:20px;width:100%;background:#eee;border-radius:10px;">'
+                    f'<div style="height:20px;width:{pct}%;background:{color};border-radius:10px;'
+                    f'text-align:center;color:white;font-size:12px;line-height:20px;">'
+                    f"{pct}%</div></div>",
+                    unsafe_allow_html=True,
+                )
 
             with col2:
                 st.markdown("#### Customer Profile")
@@ -198,23 +241,20 @@ if predict_btn:
                     }
                 )
 
+            # ── Per-prediction risk factor breakdown ────────────────
             st.markdown("---")
-            st.markdown("#### \U0001f511 Key Factors in This Prediction")
-            st.markdown(
-                """
-Based on global SHAP analysis from the trained model, the top features
-that most strongly influence churn risk are:
+            st.markdown("#### \U0001f50d Risk Factors for This Customer")
 
-1. **Contract Type** \u2014 Month-to-month contracts have significantly higher
-   churn risk (42.7%) vs two-year contracts (2.8%).
-2. **Tenure** \u2014 Customers with less than 10 months of tenure are at
-   the highest risk of churning.
-3. **Internet Service** \u2014 Fiber optic customers churn at higher rates
-   compared to DSL customers, likely due to service quality or pricing.
+            active = get_active_risk_factors(raw_input)
+            if active:
+                for label, detail in active:
+                    st.markdown(f"- **{label}:** {detail}")
+            else:
+                st.markdown("*None of the top risk factors apply to this profile.*")
 
-> *For a personalized explanation with feature-level SHAP values,
-> consider deploying a SHAP explainer endpoint alongside the model.*
-"""
+            st.caption(
+                "Based on SHAP analysis from the trained model. "
+                "Features shown are the strongest global predictors of churn."
             )
 
         except Exception as e:
@@ -223,6 +263,22 @@ that most strongly influence churn risk are:
                 "Try re-running `save_artifacts.py` to ensure model files "
                 "are up to date."
             )
+
+# ── Prediction History ──────────────────────────────────────────────────
+if st.session_state.history:
+    st.markdown("---")
+    st.markdown("### \U0001f4cb Session History")
+
+    hist_df = pd.DataFrame(st.session_state.history)
+    st.dataframe(hist_df, use_container_width=True, hide_index=True)
+
+    csv = hist_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="\U0001f4e5 Download as CSV",
+        data=csv,
+        file_name=f"churn_predictions_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
+    )
 
 # ── Footer ──────────────────────────────────────────────────────────────
 st.sidebar.markdown("---")
