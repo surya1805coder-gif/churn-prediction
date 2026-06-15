@@ -479,17 +479,14 @@ def render_scene2(frame_num):
         
     # Render cursor overlay
     if cursor_alpha > 0:
-        # Create cursor image with alpha channel
-        cursor_img = Image.new('RGBA', (WIDTH, HEIGHT), (0, 0, 0, 0))
+        # Create a small cursor image with alpha
+        cursor_size = 24
+        cursor_img = Image.new('RGBA', (cursor_size, cursor_size), (0, 0, 0, 0))
         cursor_draw = ImageDraw.Draw(cursor_img)
-        draw_cursor(cursor_draw, cursor_x, cursor_y)
+        draw_cursor(cursor_draw, cursor_size // 2, cursor_size // 2)
         
-        # Create and apply alpha mask properly
-        alpha_mask = Image.new('L', (WIDTH, HEIGHT), int(cursor_alpha * 255))
-        cursor_img.putalpha(alpha_mask)
-        
-        # Blend with main image
-        img = Image.alpha_composite(img.convert('RGBA'), cursor_img).convert('RGB')
+        # Paste the cursor onto the main image with alpha blending
+        img.paste(cursor_img, (cursor_x - cursor_size // 2, cursor_y - cursor_size // 2), cursor_img)
         
     return img
 
